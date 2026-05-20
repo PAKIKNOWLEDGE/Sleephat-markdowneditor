@@ -1,0 +1,29 @@
+{
+  "name": "markdown-editor",
+  "private": true,
+  "version": "0.1.0",
+  "description": "A lightweight WYSIWYG markdown editor powered by Vditor",
+  "author": "pachu77",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "tauri": "tauri"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2",
+    "@tauri-apps/plugin-dialog": "^2",
+    "@tauri-apps/plugin-opener": "^2",
+    "date-fns": "^2.30.0",
+    "lodash": "^4.17.21",
+    "vditor": "^3.10.3"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2",
+    "@types/lodash": "^4.17.0",
+    "typescript": "^5.0.0",
+    "vite": "^4.0.0"
+  }
+}
