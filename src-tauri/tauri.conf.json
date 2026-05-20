@@ -2,8 +2,6 @@
   "productName": "Markdown Editor",
   "version": "0.1.0",
   "identifier": "com.sleephat.markdown-editor",
-  "description": "A lightweight WYSIWYG markdown editor powered by Vditor",
-  "homepage": "https://github.com/pachu77/markdown-editor",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
