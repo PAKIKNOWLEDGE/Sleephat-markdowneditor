@@ -42,7 +42,14 @@
         "depends": []
       },
       "rpm": {
-        "depends": []
+        "depends": [
+          "webkit2gtk4.1",
+          "gtk3",
+          "libappindicator-gtk3",
+          "librsvg2",
+          "xdg-desktop-portal",
+          "xdg-desktop-portal-gtk"
+        ]
       }
     }
   }
