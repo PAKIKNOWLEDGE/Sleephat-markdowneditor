@@ -74,7 +74,8 @@ struct AppState {
 
 #[tauri::command]
 fn open_file_dialog(app: tauri::AppHandle) -> Result<Option<(String, String)>, String> {
-    let file = app
+    let window = app.get_webview_window("main").ok_or("无法获取主窗口")?;
+    let file = window
         .dialog()
         .file()
         .add_filter("Markdown", &["md", "markdown"])
@@ -128,7 +129,8 @@ fn save_file(app: tauri::AppHandle, path: String, content: String) -> Result<(),
 
 #[tauri::command]
 fn save_file_as(app: tauri::AppHandle, content: String) -> Result<Option<String>, String> {
-    let file = app
+    let window = app.get_webview_window("main").ok_or("无法获取主窗口")?;
+    let file = window
         .dialog()
         .file()
         .add_filter("Markdown", &["md", "markdown"])
@@ -241,6 +243,11 @@ fn request_close(app: tauri::AppHandle) -> Result<(), String> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // WebKitGTK 在 Wayland 上 GPU 合成有问题 → 白屏。
+    // 走 CPU 合成解决，不影响 Windows/macOS。
+    #[cfg(target_os = "linux")]
+    std::env::set_var("WEBKIT_DISABLE_COMPOSITING_MODE", "1");
+
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
