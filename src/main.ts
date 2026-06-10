@@ -10,6 +10,7 @@ declare global {
 import './preload'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
+import { getCurrentWindow } from '@tauri-apps/api/window'
 import { message, ask } from '@tauri-apps/plugin-dialog'
 import { merge } from 'lodash'
 import Vditor from 'vditor'
@@ -29,6 +30,9 @@ import {
 import { fixTableIr } from './fix-table-ir'
 import './styles.css'
 
+// 模块级 window 引用，供 updateTitle 等各处使用
+const appWindow = getCurrentWindow()
+
 // ── 状态 ──
 let currentFilePath: string | null = null
 let isDirty = false
@@ -39,6 +43,7 @@ let pendingContent: string | null = null
 // ── DOM 元素 ──
 const welcomeOverlay = document.getElementById('welcome-overlay')!
 const btnOpenFile = document.getElementById('btn-open-file')!
+const btnNewFile = document.getElementById('btn-new-file')!
 
 // ── 欢迎界面 ──
 function showWelcome() {
@@ -54,9 +59,11 @@ function updateTitle() {
     ? currentFilePath.split(/[/\\]/).pop()
     : ''
   const prefix = isDirty ? '● ' : ''
-  document.title = name
-    ? `${prefix}${name} — Markdown Editor`
-    : 'Markdown Editor'
+  const title = name
+    ? `${prefix}${name}`
+    : 'Sleephat Editor'
+  document.title = title
+  appWindow.setTitle(title).catch(() => {})
   invoke('set_dirty', { dirty: isDirty }).catch(() => {})
 }
 
@@ -111,7 +118,12 @@ async function openFile(path?: string) {
 
 // 全局暴露 saveFile，让 toolbar.ts 可以调用
 ;(window as any).__saveFile = saveFile
-async function saveFile() {
+
+/**
+ * 保存文件
+ * @param explicit true=显式保存（Ctrl+S/按钮），清 dirty 标记；false=自动保存，不清 dirty
+ */
+async function saveFile(explicit = true) {
   if (!currentFilePath) {
     await saveFileAs()
     return
@@ -120,7 +132,8 @@ async function saveFile() {
   const content = window.vditor?.getValue() || ''
   try {
     await invoke('save_file', { path: currentFilePath, content })
-    if (isDirty) {
+    // 只有显式保存才清除 dirty 标记，auto-save 只管存盘
+    if (explicit && isDirty) {
       isDirty = false
       updateTitle()
     }
@@ -139,7 +152,10 @@ async function saveFileAs() {
     isDirty = false
     hideWelcome()
     updateTitle()
-  } catch (_) {}
+  } catch (e: any) {
+    console.error('另存为失败:', e)
+    await message(`保存失败: ${e}`, { kind: 'error' })
+  }
 }
 
 async function newFile() {
@@ -196,10 +212,11 @@ async function initVditor(content: string) {
     toolbarConfig: { pin: true },
     ...defaultOptions,
     after() {
-      fixDarkTheme()
-      handleToolbarClick()
-      fixTableIr()
-      fixPanelHover()
+      // 每个步骤独立 try-catch，防止一个崩溃拖垮全局
+      try { fixDarkTheme() } catch (e) { console.error('fixDarkTheme failed:', e) }
+      try { handleToolbarClick() } catch (e) { console.error('handleToolbarClick failed:', e) }
+      try { fixTableIr() } catch (e) { console.error('fixTableIr failed:', e) }
+      try { fixPanelHover() } catch (e) { console.error('fixPanelHover failed:', e) }
     },
     input() {
       // 跳过初始化时的 content 设置
@@ -211,10 +228,10 @@ async function initVditor(content: string) {
       isDirty = true
       updateTitle()
 
-      // 自动保存（防抖 300ms）
+      // 自动保存（防抖 300ms）—— 不传 explicit=false，不清 dirty 标记
       if (saveTimer) clearTimeout(saveTimer)
       saveTimer = setTimeout(() => {
-        saveFile()
+        saveFile(false)
       }, 300)
     },
     upload: {
@@ -287,8 +304,12 @@ document.addEventListener('keydown', async (e) => {
   }
 })
 
-// 欢迎界面的"打开文件"按钮
+// 欢迎界面的按钮
 btnOpenFile.addEventListener('click', () => openFile())
+btnNewFile.addEventListener('click', () => {
+  // 直接弹出另存为对话框，让用户创建新文件
+  saveFileAs()
+})
 
 // ── 关闭确认 ──
 
@@ -297,6 +318,12 @@ btnOpenFile.addEventListener('click', () => openFile())
 // 前端弹确认框 → invoke('request_close') 让 Rust 放行关闭
 
 listen('close-requested', async () => {
+  // 取消待执行的 auto-save，防止在对话框期间偷偷存盘
+  if (saveTimer) {
+    clearTimeout(saveTimer)
+    saveTimer = null
+  }
+
   // 无修改 → 直接请求关闭（不弹确认）
   if (!isDirty) {
     await invoke('request_close')
@@ -315,14 +342,6 @@ listen('close-requested', async () => {
     await invoke('request_close')
   }
   // 取消 → 什么也不做
-})
-
-// 监听 Rust 端保存成功事件，清除脏标记
-listen('saved', () => {
-  if (isDirty) {
-    isDirty = false
-    updateTitle()
-  }
 })
 
 // ── 拖拽打开文件 ──
@@ -363,6 +382,30 @@ async function main() {
   // 外部链接拦截
   fixLinkClick()
   fixCut()
+
+  // ── 外部文件修改检测：切回窗口时检查 mtime ──
+  appWindow.onFocusChanged(async ({ payload: focused }) => {
+    if (!focused || !currentFilePath) return
+    try {
+      const changed = await invoke<boolean>('check_file_changed', {
+        path: currentFilePath,
+      })
+      if (!changed) return
+      const result = await ask('文件已被外部修改，是否重新加载？', {
+        kind: 'warning',
+        buttons: ['重新加载', '忽略'],
+      })
+      if (result === true) {
+        const content = await invoke<string>('read_file', {
+          path: currentFilePath,
+        })
+        window.vditor?.setValue(content)
+      }
+      // result === false （忽略）→ Rust 端 check_file_changed 已更新 mtime，不再重复提示
+    } catch (e) {
+      console.error('检查文件变更失败:', e)
+    }
+  })
 }
 
 main().catch(console.error)

@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
+use std::time::SystemTime;
 
 use base64::Engine;
 use serde::{Deserialize, Serialize};
@@ -68,6 +69,7 @@ struct AppState {
     current_file: Mutex<Option<String>>,
     is_dirty: Mutex<bool>,
     force_close: Mutex<bool>, // 前端确认后强制关闭
+    last_file_mtime: Mutex<Option<SystemTime>>, // 外部修改检测
 }
 
 // ── Tauri Commands ───────────────────────────────────────
@@ -91,6 +93,12 @@ fn open_file_dialog(app: tauri::AppHandle) -> Result<Option<(String, String)>, S
             let state = app.state::<AppState>();
             *state.current_file.lock().unwrap() = Some(path_str.clone());
             *state.is_dirty.lock().unwrap() = false;
+            // 记录文件修改时间用于外部检测
+            if let Ok(meta) = fs::metadata(&path_str) {
+                if let Ok(mtime) = meta.modified() {
+                    *state.last_file_mtime.lock().unwrap() = Some(mtime);
+                }
+            }
 
             // 添加到最近文件
             let mut config = load_config(&app);
@@ -111,8 +119,14 @@ fn open_file_dialog(app: tauri::AppHandle) -> Result<Option<(String, String)>, S
 fn read_file(app: tauri::AppHandle, path: String) -> Result<String, String> {
     let content = fs::read_to_string(&path).map_err(|e| e.to_string())?;
     let state = app.state::<AppState>();
-    *state.current_file.lock().unwrap() = Some(path);
+    *state.current_file.lock().unwrap() = Some(path.clone());
     *state.is_dirty.lock().unwrap() = false;
+    // 记录文件修改时间用于外部检测
+    if let Ok(meta) = fs::metadata(&path) {
+        if let Ok(mtime) = meta.modified() {
+            *state.last_file_mtime.lock().unwrap() = Some(mtime);
+        }
+    }
     Ok(content)
 }
 
@@ -121,6 +135,12 @@ fn save_file(app: tauri::AppHandle, path: String, content: String) -> Result<(),
     fs::write(&path, &content).map_err(|e| e.to_string())?;
     let state = app.state::<AppState>();
     *state.is_dirty.lock().unwrap() = false;
+    // 更新跟踪的 mtime，避免自我保存触发"外部修改"误报
+    if let Ok(meta) = fs::metadata(&path) {
+        if let Ok(mtime) = meta.modified() {
+            *state.last_file_mtime.lock().unwrap() = Some(mtime);
+        }
+    }
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.emit("saved", ());
     }
@@ -239,6 +259,31 @@ fn request_close(app: tauri::AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+// ── 外部文件修改检测 ──────────────────────────────────────
+
+/// 检测文件是否被外部修改（对比上次记录的 mtime）
+#[tauri::command]
+fn check_file_changed(app: tauri::AppHandle, path: String) -> Result<bool, String> {
+    let meta = fs::metadata(&path).map_err(|e| e.to_string())?;
+    let mtime = meta.modified().map_err(|e| e.to_string())?;
+    let state = app.state::<AppState>();
+    let mut last_mtime = state.last_file_mtime.lock().unwrap();
+    match *last_mtime {
+        Some(prev) => {
+            if mtime != prev {
+                *last_mtime = Some(mtime); // 更新记录，下次不再重复提示
+                return Ok(true);
+            }
+            Ok(false)
+        }
+        None => {
+            // 首次检查，记录 mtime
+            *last_mtime = Some(mtime);
+            Ok(false)
+        }
+    }
+}
+
 // ── 应用入口 ─────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -255,6 +300,7 @@ pub fn run() {
             current_file: Mutex::new(None),
             is_dirty: Mutex::new(false),
             force_close: Mutex::new(false),
+            last_file_mtime: Mutex::new(None),
         })
         .invoke_handler(tauri::generate_handler![
             open_file_dialog,
@@ -270,8 +316,23 @@ pub fn run() {
             is_dirty,
             show_message,
             request_close,
+            check_file_changed,
         ])
         .setup(|app| {
+            // ── 命令行参数：读取首个非 flag 参数作为文件路径 ──
+            {
+                let args: Vec<String> = std::env::args().collect();
+                let file_arg = args.iter().skip(1).find(|a| {
+                    !a.starts_with('-') && !a.starts_with("http")
+                });
+                if let Some(path) = file_arg {
+                    if std::path::Path::new(path).exists() {
+                        let state = app.state::<AppState>();
+                        *state.current_file.lock().unwrap() = Some(path.clone());
+                    }
+                }
+            }
+
             // 拦截关闭请求：api.prevent_close() 真正阻止关闭
             if let Some(window) = app.get_webview_window("main") {
                 let w = window.clone();
@@ -279,11 +340,13 @@ pub fn run() {
                     if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                         let state = w.state::<AppState>();
 
-                        // 如果已经确认关闭（force_close=true），放行
-                        if *state.force_close.lock().unwrap() {
-                            *state.force_close.lock().unwrap() = false;
+                        // 同一锁作用域内读+复位，避免重入竞态
+                        let mut force = state.force_close.lock().unwrap();
+                        if *force {
+                            *force = false;
                             return;
                         }
+                        drop(force);
 
                         // 阻止关闭
                         api.prevent_close();

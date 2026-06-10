@@ -81,6 +81,15 @@ export const toolbar = [
         name: 'reset-config',
         icon: t('resetConfig'),
         async click() {
+          // 检查脏文件，防止未保存内容丢失
+          const dirty = await invoke<boolean>('is_dirty')
+          if (dirty) {
+            const discard = await ask('当前文件有未保存的修改。重置配置会丢失修改，是否继续？', {
+              kind: 'warning',
+              buttons: ['丢弃并重置', '取消'],
+            })
+            if (!discard) return
+          }
           const ok = await ask(t('resetConfirm'), {
             kind: 'warning',
             buttons: ['确认', '取消'],

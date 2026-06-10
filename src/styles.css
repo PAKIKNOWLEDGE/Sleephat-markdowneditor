@@ -94,6 +94,7 @@ body {
   color: black;
   text-align: center;
   font-family: none;
+  pointer-events: none; /* X11 兼容：让点击穿透遮罩直达按钮 */
 }
 .vditor-panel:hover,
 .vditor-panel_hover {
@@ -105,6 +106,17 @@ body {
 .vditor-panel:hover:after,
 .vditor-panel_hover:after {
   display: none;
+}
+
+/* 表格编辑面板：始终完整显示，不收折 */
+.vditor-panel-ir {
+  max-width: none !important;
+  max-height: none !important;
+  overflow: visible !important;
+  transform: none !important;
+}
+.vditor-panel-ir::after {
+  display: none !important;
 }
 .vditor-reset {
   padding-left: 35px !important;

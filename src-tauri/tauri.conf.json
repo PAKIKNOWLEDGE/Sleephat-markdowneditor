@@ -1,7 +1,7 @@
 {
-  "productName": "Markdown Editor",
+  "productName": "Sleephat Editor",
   "version": "0.1.0",
-  "identifier": "com.sleephat.markdown-editor",
+  "identifier": "com.sleephat.editor",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
@@ -11,7 +11,7 @@
   "app": {
     "windows": [
       {
-        "title": "Markdown Editor",
+        "title": "Sleephat Editor",
         "width": 1000,
         "height": 750,
         "resizable": true,
@@ -26,7 +26,7 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["msi", "rpm"],
+    "targets": ["msi", "deb"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

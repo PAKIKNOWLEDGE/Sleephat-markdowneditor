@@ -29,19 +29,43 @@ export function fixDarkTheme() {
 }
 
 // ── Panel hover 加定时延迟 ──
-export function fixPanelHover() {
-  document.querySelectorAll('.vditor-panel').forEach((el) => {
-    let timer: ReturnType<typeof setTimeout>
-    el.addEventListener('mouseenter', () => {
-      timer && clearTimeout(timer)
-      el.classList.add('vditor-panel_hover')
-    })
-    el.addEventListener('mouseleave', () => {
-      timer = setTimeout(() => {
-        el.classList.remove('vditor-panel_hover')
-      }, 2000)
-    })
+// X11 兼容：MutationObserver 捕获动态创建的三个点子面板
+function _bindPanelHover(el: Element) {
+  let timer: ReturnType<typeof setTimeout>
+  el.addEventListener('mouseenter', () => {
+    timer && clearTimeout(timer)
+    el.classList.add('vditor-panel_hover')
   })
+  el.addEventListener('mouseleave', () => {
+    timer = setTimeout(() => {
+      el.classList.remove('vditor-panel_hover')
+    }, 2000)
+  })
+}
+
+let _panelHoverObserver: MutationObserver | null = null
+
+export function fixPanelHover() {
+  // 绑定已有的面板
+  document.querySelectorAll('.vditor-panel').forEach(_bindPanelHover)
+
+  // 断开旧 observer 防泄漏（Vditor 重建 DOM 时复用）
+  if (_panelHoverObserver) _panelHoverObserver.disconnect()
+
+  // 监听后续动态创建的面板（如"三个点"子菜单）
+  _panelHoverObserver = new MutationObserver((mutations) => {
+    for (const m of mutations) {
+      for (const node of m.addedNodes) {
+        if (node instanceof HTMLElement) {
+          if (node.classList.contains('vditor-panel')) {
+            _bindPanelHover(node)
+          }
+          node.querySelectorAll('.vditor-panel').forEach(_bindPanelHover)
+        }
+      }
+    }
+  })
+  _panelHoverObserver.observe(document.body, { childList: true, subtree: true })
 }
 
 // ── 文件转 base64 用于传输 ──
@@ -69,15 +93,21 @@ export function saveVditorOptions() {
 }
 
 // ── Toolbar 点击时保存配置 ──
+// X11 兼容：同时监听 click 和 mousedown（部分 WebKitGTK 版本下 click 不可靠）
+let _tbActionFired = false
+
 export function handleToolbarClick() {
   document.querySelectorAll(
     '.vditor-toolbar .vditor-panel--left button, .vditor-toolbar .vditor-panel--arrow button'
   ).forEach((btn) => {
-    btn.addEventListener('click', () => {
-      setTimeout(() => {
-        saveVditorOptions()
-      }, 500)
-    })
+    const handler = () => {
+      if (_tbActionFired) return
+      _tbActionFired = true
+      setTimeout(() => { _tbActionFired = false }, 300)
+      setTimeout(() => { saveVditorOptions() }, 500)
+    }
+    btn.addEventListener('click', handler)
+    btn.addEventListener('mousedown', handler)
   })
 }
 
@@ -105,15 +135,21 @@ export function fixLinkClick() {
 }
 
 // ── 修复 execCommand recursive call bug ──
+// WebKitGTK (X11) 需要同步返回 true/false，setTimeout 异步丢掉返回值会导致 Vditor 工具栏操作链中断
+let _cutDepth = 0
+
 export function fixCut() {
   const _exec = document.execCommand.bind(document)
   document.execCommand = ((cmd: string, ...args: any[]) => {
     if (cmd === 'delete') {
-      setTimeout(() => {
+      if (_cutDepth > 0) return true // 重入保护，返回成功
+      _cutDepth++
+      try {
         return _exec(cmd, ...args)
-      })
-    } else {
-      return _exec(cmd, ...args)
+      } finally {
+        _cutDepth--
+      }
     }
+    return _exec(cmd, ...args)
   }) as typeof document.execCommand
 }
