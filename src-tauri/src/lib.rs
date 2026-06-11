@@ -18,6 +18,7 @@ pub struct AppConfig {
     pub window_height: Option<u32>,
     pub window_x: Option<i32>,
     pub window_y: Option<i32>,
+    pub welcome_dark: Option<bool>,
 }
 
 impl Default for AppConfig {
@@ -29,6 +30,7 @@ impl Default for AppConfig {
             window_height: None,
             window_x: None,
             window_y: None,
+            welcome_dark: None,
         }
     }
 }

@@ -383,6 +383,25 @@ async function main() {
   fixLinkClick()
   fixCut()
 
+  // ── 欢迎页深色/浅色手动切换 ──
+  const btnWelcomeTheme = document.getElementById('btn-welcome-theme') as HTMLButtonElement | null
+  try {
+    const config = await invoke<any>('get_config')
+    if (config?.welcome_dark) {
+      welcomeOverlay.classList.add('welcome-dark')
+      if (btnWelcomeTheme) btnWelcomeTheme.textContent = '☀️'
+    }
+  } catch (_) {}
+  btnWelcomeTheme?.addEventListener('click', async () => {
+    const isDark = welcomeOverlay.classList.toggle('welcome-dark')
+    btnWelcomeTheme.textContent = isDark ? '☀️' : '🌙'
+    try {
+      const config = await invoke<any>('get_config')
+      config.welcome_dark = isDark
+      await invoke('save_config', { config })
+    } catch (_) {}
+  })
+
   // ── 外部文件修改检测：切回窗口时检查 mtime ──
   appWindow.onFocusChanged(async ({ payload: focused }) => {
     if (!focused || !currentFilePath) return

@@ -66,6 +66,33 @@ body {
   font-family: inherit;
 }
 
+/* ── 欢迎页主题切换按钮 ── */
+.welcome-theme-btn {
+  position: absolute;
+  top: 0;
+  right: 0;
+  background: none;
+  border: 1px solid var(--border, #ddd);
+  border-radius: 6px;
+  padding: 4px 10px;
+  font-size: 16px;
+  cursor: pointer;
+  line-height: 1;
+}
+.welcome-theme-btn:hover {
+  opacity: 0.7;
+}
+
+/* ── 欢迎界面深色模式 ── */
+.welcome-dark {
+  --bg: #1a1a2e;
+  --text: #e0e0e0;
+  --muted: #888;
+  --border: #333;
+  --btn-bg: #2a2a3e;
+  --btn-hover: #3a3a4e;
+}
+
 /* ── Vditor 主题适配 ── */
 .vditor--dark .vditor-reset code:not(.hljs):not(.highlight-chroma) {
   background-color: rgba(66, 133, 244, 0.1);
