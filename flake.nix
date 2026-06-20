@@ -41,15 +41,12 @@
           nativeBuildInputs = native-build-deps;
           buildInputs = tauri-system-deps;
 
-          # npm 国内镜像（大陆友好）
-          npmRegistry = "https://registry.npmmirror.com";
-
           # cargo 国内镜像
           CARGO_HOME = "$TMPDIR/cargo-home";
 
           preConfigure = ''
-            # npm 换源
-            npm config set registry "${npmRegistry}"
+            # npm 换源（淘宝镜像）
+            npm config set registry "https://registry.npmmirror.com"
 
             # cargo 换源（中科大）
             mkdir -p $CARGO_HOME
