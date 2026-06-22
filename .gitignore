@@ -7,3 +7,5 @@ src-tauri/gen/
 Thumbs.db
 test.md
 .reasonix/
+log.md
+result/
