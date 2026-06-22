@@ -8,4 +8,5 @@ Thumbs.db
 test.md
 .reasonix/
 log.md
-result/
+result
+shell.nix
