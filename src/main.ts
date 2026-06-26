@@ -348,9 +348,8 @@ listen('close-requested', async () => {
 
 document.addEventListener('dragover', (e) => e.preventDefault())
 
-document.addEventListener('drop', async (e) => {
-  e.preventDefault()
-  // Tauri v2 WebView 拖拽获取不到文件路径，暂时跳过
+listen<string>('file-dropped', (event) => {
+  openFile(event.payload)
 })
 
 // ── 应用启动 ──

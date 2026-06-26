@@ -335,26 +335,39 @@ pub fn run() {
                 }
             }
 
-            // 拦截关闭请求：api.prevent_close() 真正阻止关闭
+            // ── 拦截关闭请求 + 拖拽打开文件 ──
             if let Some(window) = app.get_webview_window("main") {
                 let w = window.clone();
                 window.on_window_event(move |event| {
-                    if let tauri::WindowEvent::CloseRequested { api, .. } = event {
-                        let state = w.state::<AppState>();
+                    match event {
+                        tauri::WindowEvent::CloseRequested { api, .. } => {
+                            let state = w.state::<AppState>();
 
-                        // 同一锁作用域内读+复位，避免重入竞态
-                        let mut force = state.force_close.lock().unwrap();
-                        if *force {
-                            *force = false;
-                            return;
+                            // 同一锁作用域内读+复位，避免重入竞态
+                            let mut force = state.force_close.lock().unwrap();
+                            if *force {
+                                *force = false;
+                                return;
+                            }
+                            drop(force);
+
+                            // 阻止关闭
+                            api.prevent_close();
+
+                            // 通知前端弹出确认框
+                            let _ = w.emit("close-requested", ());
                         }
-                        drop(force);
-
-                        // 阻止关闭
-                        api.prevent_close();
-
-                        // 通知前端弹出确认框
-                        let _ = w.emit("close-requested", ());
+                        tauri::WindowEvent::DragDrop(drag_event) => {
+                            if let tauri::DragDropEvent::Drop { paths, position: _ } = drag_event {
+                                if let Some(path) = paths.first() {
+                                    let path_str = path.to_string_lossy().to_string();
+                                    if path_str.ends_with(".md") || path_str.ends_with(".markdown") {
+                                        let _ = w.emit("file-dropped", path_str);
+                                    }
+                                }
+                            }
+                        }
+                        _ => {}
                     }
                 });
             }

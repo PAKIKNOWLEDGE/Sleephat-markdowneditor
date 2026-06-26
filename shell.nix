@@ -3,6 +3,7 @@
 pkgs.mkShell {
   nativeBuildInputs = with pkgs; [
     pkg-config cargo rustc nodejs_22 cacert
+    dpkg rpm-build appimagekit
   ];
 
   buildInputs = with pkgs; [
