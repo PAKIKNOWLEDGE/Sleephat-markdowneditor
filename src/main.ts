@@ -28,6 +28,7 @@ import {
   saveVditorOptions,
 } from './utils'
 import { fixTableIr } from './fix-table-ir'
+import { initSearch } from './search'
 import './styles.css'
 
 // 模块级 window 引用，供 updateTitle 等各处使用
@@ -217,6 +218,12 @@ async function initVditor(content: string) {
       try { handleToolbarClick() } catch (e) { console.error('handleToolbarClick failed:', e) }
       try { fixTableIr() } catch (e) { console.error('fixTableIr failed:', e) }
       try { fixPanelHover() } catch (e) { console.error('fixPanelHover failed:', e) }
+      // 初始化查找栏（幂等，见 initSearch 内部缓存）
+      try { initSearch() } catch (e) { console.error('initSearch failed:', e) }
+      // 有文件时自动聚焦编辑器（欢迎页场景不抢焦点）
+      if (currentFilePath) {
+        try { window.vditor.focus() } catch (e) { console.error('focus failed:', e) }
+      }
     },
     input() {
       // 跳过初始化时的 content 设置

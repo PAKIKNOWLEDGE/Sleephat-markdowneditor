@@ -111,21 +111,63 @@ export function handleToolbarClick() {
   })
 }
 
+/**
+ * Approximates the GitHub-style heading slug so in-page `#anchor` links (e.g. a Table
+ * of Contents) can be matched against the rendered heading text.
+ */
+function slugifyHeading(text: string): string {
+  return text
+    .trim()
+    // Vditor 的 IR 模式把字面 `#`/`##` 标记保留在 heading 的 textContent 里
+    // （与最终渲染输出不同），先剥掉
+    .replace(/^#{1,6}\s*/, '')
+    .toLowerCase()
+    .replace(/[`*_~]/g, '')
+    .replace(/[^\p{L}\p{N}\- ]+/gu, '')
+    // GitHub 的 slugger 逐个替换空格而不折叠连续空白，
+    // 因此 "Foo & Bar"（"&" 剥掉后变 "foo  bar"）→ "foo--bar" 而非 "foo-bar"
+    .replace(/ /g, '-')
+}
+
+/**
+ * 滚动到与页内 `#anchor` 匹配的标题。找到并滚动返回 true。
+ */
+function scrollToHeadingAnchor(fragment: string): boolean {
+  const target = decodeURIComponent(fragment).toLowerCase()
+  const headings = document.querySelectorAll(
+    '.vditor-reset h1, .vditor-reset h2, .vditor-reset h3, .vditor-reset h4, .vditor-reset h5, .vditor-reset h6'
+  )
+  for (const h of Array.from(headings)) {
+    if (slugifyHeading(h.textContent || '') === target) {
+      h.scrollIntoView({ block: 'start', behavior: 'smooth' })
+      return true
+    }
+  }
+  return false
+}
+
 // ── 修复链接点击 ──
+// Vditor 的 IR 模式不会渲染真实的 <a href>：链接语法由 [data-type="a"] 包裹层内的
+// .vditor-ir__marker--link span 持有 URL（见上游 zaaack/vscode-markdown-editor 对
+// fixLinkClick 的重写）。因此不能简单向上找 <A> 标签，否则 IR 模式下点击链接无响应。
 export function fixLinkClick() {
   document.addEventListener('click', (e) => {
-    let el = e.target as HTMLElement
-    // Walk up to find anchor
-    while (el && el.tagName !== 'A') {
-      el = el.parentElement as HTMLElement
+    const target = e.target as HTMLElement
+    const link = target.closest('a')
+    const irLinkMarker = target
+      .closest<HTMLElement>('[data-type="a"]')
+      ?.querySelector('.vditor-ir__marker--link')
+    const href = link?.getAttribute('href') || irLinkMarker?.textContent || undefined
+
+    if (!href) return
+    e.preventDefault()
+    e.stopPropagation()
+    // 页内锚点：直接滚动到对应标题
+    if (href.startsWith('#')) {
+      scrollToHeadingAnchor(href.slice(1))
+      return
     }
-    if (el && el.tagName === 'A') {
-      const href = (el as HTMLAnchorElement).href
-      if (href) {
-        e.preventDefault()
-        invoke('open_link', { url: href }).catch(console.error)
-      }
-    }
+    invoke('open_link', { url: href }).catch(console.error)
   })
   // Override window.open
   window.open = ((url: string, ...args: any[]) => {

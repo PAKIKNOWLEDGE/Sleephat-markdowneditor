@@ -195,9 +195,41 @@ fn save_images(_app: tauri::AppHandle, dir: String, files: Vec<ImageFile>) -> Re
     Ok(saved_paths)
 }
 
+/// 判断字符串是否带 URI scheme 前缀（http:、file:、C: 盘符等）
+fn has_uri_scheme(url: &str) -> bool {
+    let bytes = url.as_bytes();
+    if !bytes.first().map(|b| b.is_ascii_alphabetic()).unwrap_or(false) {
+        return false;
+    }
+    for (i, &c) in bytes.iter().enumerate().skip(1) {
+        if c == b':' {
+            return true;
+        }
+        if !(c.is_ascii_alphanumeric() || c == b'+' || c == b'-' || c == b'.') {
+            return false;
+        }
+    }
+    false
+}
+
 #[tauri::command]
-fn open_link(url: String) -> Result<(), String> {
-    tauri_plugin_opener::open_path(&url, None::<&str>)
+fn open_link(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    // 相对路径（markdown 内部链接，如 ./doc.md、assets/a.png）→ 基于当前文件目录解析为绝对路径；
+    // 带 scheme（http/https/file/盘符）的直接交给系统 opener
+    let resolved = if !has_uri_scheme(&url) {
+        let current = app.state::<AppState>().current_file.lock().unwrap().clone();
+        match current {
+            Some(cf) => Path::new(&cf)
+                .parent()
+                .map(|dir| dir.join(&url))
+                .unwrap_or_else(|| PathBuf::from(&url)),
+            None => PathBuf::from(&url),
+        }
+    } else {
+        PathBuf::from(&url)
+    };
+
+    tauri_plugin_opener::open_path(&resolved, None::<&str>)
         .map_err(|e| format!("打开链接失败: {}", e))
 }
 

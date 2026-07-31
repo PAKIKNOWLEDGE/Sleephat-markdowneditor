@@ -6,6 +6,8 @@ src-tauri/gen/
 .DS_Store
 Thumbs.db
 test.md
+sub.md
+reference/
 .reasonix/
 log.md
 result
