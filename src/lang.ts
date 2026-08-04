@@ -23,10 +23,11 @@ const Langs: Record<string, Record<string, string>> = {
 
 export const lang = (() => {
   let l: string = navigator.language.replace('-', '_')
-  if (!Langs[l]) {
-    l = 'en_US'
-  }
-  return l
+  if (Langs[l]) return l
+  // 前缀匹配（L7）：`zh-Hans-CN` → `zh` → 命中 `zh_CN`，避免变体语言直接回退英文
+  const prefix = l.split('_')[0]
+  const matched = Object.keys(Langs).find((key) => key.startsWith(prefix + '_'))
+  return matched || 'en_US'
 })()
 
 export function t(msg: string): string {

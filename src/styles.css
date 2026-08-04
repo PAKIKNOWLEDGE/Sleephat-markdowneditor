@@ -13,6 +13,12 @@ body {
   width: 100%;
 }
 
+/* ── 布局变量 ── */
+/* 编辑器左右留白（L9：三处 35px 硬编码收敛为变量，改一处即同步） */
+:root {
+  --vmd-gutter: 35px;
+}
+
 /* ── 欢迎界面 ── */
 #welcome-overlay {
   position: fixed;
@@ -98,7 +104,7 @@ body {
   background-color: rgba(66, 133, 244, 0.1);
 }
 .vditor-toolbar.vditor-toolbar--pin {
-  padding-left: 35px !important;
+  padding-left: var(--vmd-gutter) !important;
 }
 .vditor-ir pre.vditor-reset {
   position: relative;
@@ -152,8 +158,33 @@ body {
 /* Vditor 的 setPadding() 只算了左侧 padding（给 gutter/工具栏留位），
    宽视口下右侧会留下大片空白，这里对称补上 */
 .vditor-reset {
-  padding-left: 35px !important;
-  padding-right: 35px !important;
+  padding-left: var(--vmd-gutter) !important;
+  padding-right: var(--vmd-gutter) !important;
+}
+
+/* ── 行号 gutter（P4-3，line-numbers.ts）── */
+#ln-gutter {
+  position: fixed;
+  width: 32px;
+  pointer-events: none;
+  user-select: none;
+  z-index: 10;
+  overflow: hidden;
+  border-right: 1px solid rgba(128, 128, 128, 0.12);
+}
+#ln-gutter .ln {
+  position: absolute;
+  width: 26px;
+  text-align: right;
+  font-size: 11px;
+  font-family: 'Cascadia Code', 'Consolas', monospace;
+  color: rgba(150, 150, 150, 0.5);
+  line-height: 1;
+}
+/* 开启行号时给内容区让出 gutter 空间（比 --vmd-gutter 宽），toolbar 同步对齐 */
+.vditor.vditor-ln-on .vditor-reset,
+.vditor.vditor-ln-on .vditor-toolbar--pin {
+  padding-left: 60px !important;
 }
 
 /* ── 查找栏（search.ts）── */

@@ -1,13 +1,4 @@
 import { invoke } from '@tauri-apps/api/core'
-import { ask } from '@tauri-apps/plugin-dialog'
-
-// ── Confirm dialog (replaces jquery-confirm) ──
-export async function confirm(msg: string): Promise<boolean> {
-  return await ask(msg, {
-    kind: 'warning',
-    buttons: ['确认', '取消'],
-  })
-}
 
 // ── 切换 content-theme 时自动修改 vditor theme ──
 export function fixDarkTheme() {
@@ -81,30 +72,43 @@ export const fileToBase64 = async (file: File): Promise<string> => {
 }
 
 // ── 保存 vditor 配置 ──
+// 防抖合并：同一批多次触发（content-theme 的 fixDarkTheme + toolbar 面板 handler）只写一次 IPC（L3）
+let _saveOptionsTimer: ReturnType<typeof setTimeout> | null = null
 export function saveVditorOptions() {
-  const options = {
-    theme: vditor.vditor.options.theme,
-    mode: vditor.vditor.currentMode,
-    preview: vditor.vditor.options.preview,
-  }
-  invoke('save_config', {
-    config: { vditor_options: options, recent_files: [] },
-  }).catch(console.error)
+  if (_saveOptionsTimer) clearTimeout(_saveOptionsTimer)
+  _saveOptionsTimer = setTimeout(() => {
+    // 不存 mode：initVditor 硬编码 ir，spread 收口后存了也会被覆盖，无需持久化（L8）
+    const options = {
+      theme: vditor.vditor.options.theme,
+      preview: vditor.vditor.options.preview,
+    }
+    // 只传 vditor_options，Rust 端 save_config 做字段合并，避免清空 recent_files/welcome_dark（S4）
+    invoke('save_config', {
+      config: { vditor_options: options },
+    }).catch(console.error)
+  }, 300)
 }
 
 // ── Toolbar 点击时保存配置 ──
-// X11 兼容：同时监听 click 和 mousedown（部分 WebKitGTK 版本下 click 不可靠）
-let _tbActionFired = false
+// X11 兼容：同时监听 click 和 mousedown（部分 WebKitGTK 版本下 click 不可靠）。
+// 去重按按钮粒度而非全局：mousedown 与 click 在同一按钮上 300ms 内只记一次，
+// 但相邻两次点击不同按钮不被吞掉（L3，原全局 _tbActionFired 会吞相邻按钮）。
+function _isRecent(el: HTMLElement): boolean {
+  const key = '__tbSaveAt'
+  const now = Date.now()
+  const prev = (el as any)[key]
+  if (prev && now - prev < 300) return true
+  ;(el as any)[key] = now
+  return false
+}
 
 export function handleToolbarClick() {
   document.querySelectorAll(
     '.vditor-toolbar .vditor-panel--left button, .vditor-toolbar .vditor-panel--arrow button'
   ).forEach((btn) => {
     const handler = () => {
-      if (_tbActionFired) return
-      _tbActionFired = true
-      setTimeout(() => { _tbActionFired = false }, 300)
-      setTimeout(() => { saveVditorOptions() }, 500)
+      if (_isRecent(btn as HTMLElement)) return
+      saveVditorOptions()
     }
     btn.addEventListener('click', handler)
     btn.addEventListener('mousedown', handler)
@@ -170,9 +174,11 @@ export function fixLinkClick() {
     invoke('open_link', { url: href }).catch(console.error)
   })
   // Override window.open
+  // 返回 null 而非 window 自身（L4）：防止调用方拿到主窗口引用后做危险操作，
+  // 也符合浏览器对"被拦截弹窗"的规范行为。
   window.open = ((url: string, ...args: any[]) => {
     invoke('open_link', { url }).catch(console.error)
-    return window
+    return null
   }) as typeof window.open
 }
 
@@ -194,4 +200,61 @@ export function fixCut() {
     }
     return _exec(cmd, ...args)
   }) as typeof document.execCommand
+}
+
+// ── 修复图片/音视频相对路径预览（P4-1 / M10 根治）──
+// 桌面端 markdown 里 `![](assets/x.png)` 的相对 src 不会按文档目录解析 → 404。
+// 方案：Rust 注册自定义 vmd-asset 协议，按「当前文件所在目录」解析相对路径。
+// 这里把渲染出的相对 src 改写成 vmd-asset://localhost/<path>，让 webview 走该协议。
+const VMD_ASSET_SCHEME = 'vmd-asset://localhost/'
+
+function getMediaRoot(): Element | null {
+  return (
+    document.querySelector('.vditor-ir .vditor-reset') ||
+    document.querySelector('.vditor-wysiwyg .vditor-reset') ||
+    document.querySelector('.vditor-sv .vditor-reset')
+  )
+}
+
+function rewriteMediaSrcs() {
+  const root = getMediaRoot()
+  if (!root) return
+  root
+    .querySelectorAll<HTMLElement>('img[src], audio[src], video[src]')
+    .forEach((el) => {
+      const src = el.getAttribute('src') || ''
+      if (!src) return
+      // 已是绝对/协议化 URL 或锚点 → 不动
+      if (/^(https?:|data:|blob:|vmd-asset:|file:|#|\/\/)/i.test(src)) return
+      el.setAttribute('src', VMD_ASSET_SCHEME + encodeURI(src))
+    })
+}
+
+let _mediaObserver: MutationObserver | null = null
+let _mediaObservedRoot: Element | null = null
+let _mediaAppObserver: MutationObserver | null = null
+
+export function fixImagePreview() {
+  const rebind = () => {
+    const root = getMediaRoot()
+    if (!root || root === _mediaObservedRoot) return
+    _mediaObserver?.disconnect()
+    _mediaObservedRoot = root
+    _mediaObserver = new MutationObserver(() => rewriteMediaSrcs())
+    _mediaObserver.observe(root, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['src'],
+    })
+    rewriteMediaSrcs()
+  }
+  rebind()
+  // Vditor 重建（destroy + new Vditor）会替换 .vditor-reset 根节点，观察 #app 顶层变化重绑
+  const appRoot = document.getElementById('app')
+  if (appRoot) {
+    if (_mediaAppObserver) _mediaAppObserver.disconnect()
+    _mediaAppObserver = new MutationObserver(rebind)
+    _mediaAppObserver.observe(appRoot, { childList: true })
+  }
 }

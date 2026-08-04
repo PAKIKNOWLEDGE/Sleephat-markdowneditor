@@ -1,7 +1,6 @@
 import { invoke } from '@tauri-apps/api/core'
-import { message, ask } from '@tauri-apps/plugin-dialog'
+import { message } from '@tauri-apps/plugin-dialog'
 import { t } from './lang'
-import { confirm } from './utils'
 
 const searchIcon = '<svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg" width="18" height="18"><path fill="currentColor" d="M15.5 14h-.79l-.28-.27A6.471 6.471 0 0 0 16 9.5 6.5 6.5 0 1 0 9.5 16c1.61 0 3.09-.59 4.23-1.57l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0C7.01 14 5 11.99 5 9.5S7.01 5 9.5 5 14 7.01 14 9.5 11.99 14 9.5 14z"/></svg>'
 
@@ -71,9 +70,9 @@ export const toolbar = [
         async click() {
           try {
             await navigator.clipboard.writeText(vditor.getValue())
-            await message('Copy Markdown successfully!', { kind: 'info' })
+            await message('复制 Markdown 成功！', { kind: 'info' })
           } catch (error: any) {
-            await message(`Copy Markdown failed! ${error.message}`, { kind: 'error' })
+            await message(`复制 Markdown 失败：${error.message}`, { kind: 'error' })
           }
         },
       },
@@ -83,9 +82,9 @@ export const toolbar = [
         async click() {
           try {
             await navigator.clipboard.writeText(vditor.getHTML())
-            await message('Copy HTML successfully!', { kind: 'info' })
+            await message('复制 HTML 成功！', { kind: 'info' })
           } catch (error: any) {
-            await message(`Copy HTML failed! ${error.message}`, { kind: 'error' })
+            await message(`复制 HTML 失败：${error.message}`, { kind: 'error' })
           }
         },
       },
@@ -96,27 +95,28 @@ export const toolbar = [
           // 检查脏文件，防止未保存内容丢失
           const dirty = await invoke<boolean>('is_dirty')
           if (dirty) {
-            const discard = await ask('当前文件有未保存的修改。重置配置会丢失修改，是否继续？', {
+            // 自定义按钮的返回值是「按钮文本」而非按钮 key（如 'ok'），需按文本比较
+            const discardBtns = { ok: '丢弃并重置', cancel: '取消' }
+            const discard = await message('当前文件有未保存的修改。重置配置会丢失修改，是否继续？', {
               kind: 'warning',
-              buttons: ['丢弃并重置', '取消'],
+              buttons: discardBtns,
             })
-            if (!discard) return
+            if (discard !== discardBtns.ok) return
           }
-          const ok = await ask(t('resetConfirm'), {
+          const resetBtns = { ok: '确认', cancel: '取消' }
+          const ok = await message(t('resetConfirm'), {
             kind: 'warning',
-            buttons: ['确认', '取消'],
+            buttons: resetBtns,
           })
-          if (ok) {
-            try {
-              await invoke('save_config', {
-                config: { vditor_options: null, recent_files: [] },
-              })
-              await message('配置已重置', { kind: 'info' })
-              // Reload the page to re-init Vditor
-              window.location.reload()
-            } catch (error: any) {
-              await message(`重置配置失败: ${error.message}`, { kind: 'error' })
-            }
+          if (ok !== resetBtns.ok) return
+          try {
+            // reset_config 直接写默认配置，真正清空 vditor_options / recent_files（修复 S4 回归）
+            await invoke('reset_config')
+            await message('配置已重置', { kind: 'info' })
+            // Reload the page to re-init Vditor
+            window.location.reload()
+          } catch (error: any) {
+            await message(`重置配置失败: ${error.message}`, { kind: 'error' })
           }
         },
       },

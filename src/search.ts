@@ -11,6 +11,10 @@ let searchRanges: Range[] = []
 let currentIndex = -1
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
 
+// 高亮上限与分批构造步长（M8）：超大文档直接 new Highlight(...ranges) 展开会栈溢出
+const MAX_HIGHLIGHT_RANGES = 500
+const HIGHLIGHT_BATCH_SIZE = 50
+
 function escapeRegex(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
@@ -50,14 +54,23 @@ function findAllRanges(query: string, caseSensitive: boolean): Range[] {
 function applyHighlights(ranges: Range[], activeIdx: number) {
   if (typeof CSS === 'undefined' || !CSS.highlights) return
 
-  if (ranges.length > 0) {
-    CSS.highlights.set('vmd-search-result', new (window as any).Highlight(...ranges))
+  const Highlight = (window as any).Highlight
+  // 只高亮前 N 个，防超大文档渲染卡死（M8）；当前项单独高亮不受此限
+  const visible = ranges.slice(0, MAX_HIGHLIGHT_RANGES)
+
+  if (visible.length > 0) {
+    // 分批构造：先小批量展开，其余 add()，避免 new Highlight(...超长数组) 栈溢出（M8）
+    const hl = new Highlight(...visible.slice(0, HIGHLIGHT_BATCH_SIZE))
+    for (let i = HIGHLIGHT_BATCH_SIZE; i < visible.length; i++) {
+      hl.add(visible[i])
+    }
+    CSS.highlights.set('vmd-search-result', hl)
   } else {
     CSS.highlights.delete('vmd-search-result')
   }
 
   if (activeIdx >= 0 && activeIdx < ranges.length) {
-    CSS.highlights.set('vmd-search-current', new (window as any).Highlight(ranges[activeIdx]))
+    CSS.highlights.set('vmd-search-current', new Highlight(ranges[activeIdx]))
   } else {
     CSS.highlights.delete('vmd-search-current')
   }
@@ -115,6 +128,7 @@ export function initSearch() {
 
   function open() {
     isOpen = true
+    rebindObserver() // 打开查找栏时重绑，确保盯住当前编辑区（M7）
     bar.classList.add('vmd-search-bar--open')
     bar.setAttribute('aria-hidden', 'false')
     input.focus()
@@ -186,20 +200,33 @@ export function initSearch() {
     }
   }, true)
 
-  // 编辑器内容变化时重跑搜索，保持高亮 range 有效
-  const observeRoot = () => {
-    const root = getEditorRoot()
-    if (!root) return
+  // 编辑器内容变化时重跑搜索，保持高亮 range 有效（M7）
+  // Vditor 重建（destroy + new Vditor）会替换 .vditor-reset 根节点，旧 observer 盯的是分离节点 → 失效。
+  // 这里通过 #app 顶层变化检测重建，disconnect 旧 observer 后重绑新的。
+  let searchObserver: MutationObserver | null = null
+  let observedRoot: Element | null = null
 
-    new MutationObserver(() => {
+  function rebindObserver() {
+    const root = getEditorRoot()
+    if (!root || root === observedRoot) return
+    searchObserver?.disconnect()
+    observedRoot = root
+    searchObserver = new MutationObserver(() => {
       if (!isOpen || !input.value) return
       if (debounceTimer) clearTimeout(debounceTimer)
       debounceTimer = setTimeout(runSearch, 300)
-    }).observe(root, { childList: true, subtree: true, characterData: true })
+    })
+    searchObserver.observe(root, { childList: true, subtree: true, characterData: true })
   }
 
   // 等 vditor 完全挂载后再开始监听
-  setTimeout(observeRoot, 1000)
+  setTimeout(rebindObserver, 1000)
+
+  // 监听编辑器容器顶层变化：Vditor 重建时根节点被替换，据此重绑（M7）
+  const appRoot = document.getElementById('app')
+  if (appRoot) {
+    new MutationObserver(rebindObserver).observe(appRoot, { childList: true })
+  }
 
   const api = { open, close }
   ;(window as any).__vmdSearch = api

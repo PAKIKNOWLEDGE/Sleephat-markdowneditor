@@ -22,6 +22,7 @@ import {
   fileToBase64,
   fixCut,
   fixDarkTheme,
+  fixImagePreview,
   fixLinkClick,
   fixPanelHover,
   handleToolbarClick,
@@ -29,6 +30,7 @@ import {
 } from './utils'
 import { fixTableIr } from './fix-table-ir'
 import { initSearch } from './search'
+import { initLineNumbers } from './line-numbers'
 import './styles.css'
 
 // 模块级 window 引用，供 updateTitle 等各处使用
@@ -40,11 +42,16 @@ let isDirty = false
 let saveTimer: ReturnType<typeof setTimeout> | null = null
 let isInitialContent = true       // 防止自动保存触发在初始化内容上
 let pendingContent: string | null = null
+// IPC 节流缓存（M4）：set_dirty 仅值变化发；setTitle 节流合并
+let lastTitleSent = ''
+let lastDirtySent: boolean | null = null
+let titleTimer: ReturnType<typeof setTimeout> | null = null
 
 // ── DOM 元素 ──
 const welcomeOverlay = document.getElementById('welcome-overlay')!
 const btnOpenFile = document.getElementById('btn-open-file')!
 const btnNewFile = document.getElementById('btn-new-file')!
+const btnWelcomeTheme = document.getElementById('btn-welcome-theme') as HTMLButtonElement | null
 
 // ── 欢迎界面 ──
 function showWelcome() {
@@ -64,25 +71,42 @@ function updateTitle() {
     ? `${prefix}${name}`
     : 'Sleephat Editor'
   document.title = title
-  appWindow.setTitle(title).catch(() => {})
-  invoke('set_dirty', { dirty: isDirty }).catch(() => {})
+  // set_dirty：仅值变化时调用，避免每次按键都发一次 IPC（M4）
+  if (lastDirtySent !== isDirty) {
+    lastDirtySent = isDirty
+    invoke('set_dirty', { dirty: isDirty }).catch(() => {})
+  }
+  // setTitle：节流合并连续更新（M4），标题变化才发
+  if (title !== lastTitleSent) {
+    lastTitleSent = title
+    if (titleTimer) clearTimeout(titleTimer)
+    titleTimer = setTimeout(() => {
+      appWindow.setTitle(title).catch(() => {})
+    }, 150)
+  }
 }
 
 // ── 文件操作 ──
 
 async function openFile(path?: string) {
+  // 取消待执行的自动保存，防止旧内容自动存盘到错误路径（M5）
+  if (saveTimer) {
+    clearTimeout(saveTimer)
+    saveTimer = null
+  }
   // 如果当前有未保存内容，先询问
   if (isDirty && currentFilePath) {
-    const result = await ask(
-      '当前文件有未保存的修改。是否保存？',
-      {
-        kind: 'warning',
-        buttons: ['保存并继续', '不保存', '取消'],
-      }
-    )
-    if (result === null) return // 取消
-    if (result === true) {
-      await saveFile()
+    // 自定义按钮的返回值是「按钮文本」而非按钮 key，需按文本比较（S6）
+    const buttons = { yes: '保存并继续', no: '不保存', cancel: '取消' }
+    const result = await message('当前文件有未保存的修改。是否保存？', {
+      kind: 'warning',
+      buttons,
+    })
+    // 只有明确点了「保存并继续」或「不保存」才继续，其余（含 Esc/关闭对话框）视为取消
+    if (result !== buttons.yes && result !== buttons.no) return
+    if (result === buttons.yes) {
+      const ok = await saveFile()
+      if (!ok) return // 保存失败，中止打开
     }
   }
 
@@ -108,9 +132,11 @@ async function openFile(path?: string) {
 
     if (window.vditor) {
       window.vditor.setValue(content)
-      // setTimeout 确保 setValue 完成后再释放标记
-      setTimeout(() => { isInitialContent = false }, 100)
+      // setValue 走 enableInput:false，不触发 input 回调，无需定时器释放标记（L6）。
+      // 同步复位，避免吞掉打开后立即的真实输入。
+      isInitialContent = false
     }
+    restoreScrollPosition(filePath)
   } catch (e: any) {
     console.error('打开文件失败:', e)
     await message(`打开文件失败: ${e}`, { kind: 'error' })
@@ -124,10 +150,10 @@ async function openFile(path?: string) {
  * 保存文件
  * @param explicit true=显式保存（Ctrl+S/按钮），清 dirty 标记；false=自动保存，不清 dirty
  */
-async function saveFile(explicit = true) {
+async function saveFile(explicit = true): Promise<boolean> {
   if (!currentFilePath) {
     await saveFileAs()
-    return
+    return true
   }
 
   const content = window.vditor?.getValue() || ''
@@ -138,9 +164,11 @@ async function saveFile(explicit = true) {
       isDirty = false
       updateTitle()
     }
+    return true
   } catch (e: any) {
     console.error('保存失败:', e)
     await message(`保存失败: ${e}`, { kind: 'error' })
+    return false
   }
 }
 
@@ -160,21 +188,31 @@ async function saveFileAs() {
 }
 
 async function newFile() {
+  // 取消待执行的自动保存，防止新建后误弹另存为对话框（M5）
+  if (saveTimer) {
+    clearTimeout(saveTimer)
+    saveTimer = null
+  }
   if (isDirty && currentFilePath) {
-    const result = await ask('当前文件有未保存的修改。是否保存？', {
+    const buttons = { yes: '保存', no: '不保存', cancel: '取消' }
+    const result = await message('当前文件有未保存的修改。是否保存？', {
       kind: 'warning',
-      buttons: ['保存', '不保存', '取消'],
+      buttons,
     })
-    if (result === null) return
-    if (result === true) {
-      await saveFile()
+    if (result !== buttons.yes && result !== buttons.no) return
+    if (result === buttons.yes) {
+      const ok = await saveFile()
+      if (!ok) return // 保存失败，中止新建
     }
   }
   currentFilePath = null
   isDirty = false
   isInitialContent = true
+  // 同步清空 Rust 端 current_file / is_dirty / mtime，避免相对链接、图片保存基准陈旧（M14）
+  try { await invoke('clear_current_file') } catch (_) {}
   window.vditor?.setValue('')
-  setTimeout(() => { isInitialContent = false }, 100)
+  // setValue 不触发 input（enableInput:false），同步复位标记（L6）
+  isInitialContent = false
   showWelcome()
   updateTitle()
 }
@@ -183,10 +221,23 @@ async function newFile() {
 
 async function initVditor(content: string) {
   let savedOptions: any = {}
+  let customCss: string | undefined
+  // P4-4 主题联动：welcome_dark 为 boolean 时视为手动覆盖，否则跟随系统深浅色
+  let initTheme: 'dark' | 'classic' = 'classic'
   try {
     const config = await invoke<any>('get_config')
     savedOptions = config?.vditor_options || {}
+    customCss = config?.custom_css
+    if (typeof config?.welcome_dark === 'boolean') {
+      initTheme = config.welcome_dark ? 'dark' : 'classic'
+    } else {
+      const t = await appWindow.theme()
+      initTheme = t === 'dark' ? 'dark' : 'classic'
+    }
   } catch (_) {}
+
+  // P4-5 customCss：用户配置的 CSS 注入到页面
+  if (customCss) injectCustomCss(customCss)
 
   const defaultOptions: any = merge({}, savedOptions, {
     preview: {
@@ -195,6 +246,12 @@ async function initVditor(content: string) {
       },
     },
   })
+  // 主题联动优先于已存配置：系统/手动主题决定编辑器外观
+  defaultOptions.theme = initTheme
+  defaultOptions.preview = defaultOptions.preview || {}
+  defaultOptions.preview.theme = {
+    current: initTheme === 'dark' ? 'dark' : 'light',
+  }
 
   if (window.vditor) {
     window.vditor.destroy()
@@ -207,11 +264,11 @@ async function initVditor(content: string) {
     minHeight: '100%',
     lang,
     value: content,
-    mode: 'ir',
     cache: { enable: false },
     toolbar,
     toolbarConfig: { pin: true },
     ...defaultOptions,
+    mode: 'ir', // spread 收口（L8）：init 硬编码模式不被保存配置覆盖
     after() {
       // 每个步骤独立 try-catch，防止一个崩溃拖垮全局
       try { fixDarkTheme() } catch (e) { console.error('fixDarkTheme failed:', e) }
@@ -220,6 +277,10 @@ async function initVditor(content: string) {
       try { fixPanelHover() } catch (e) { console.error('fixPanelHover failed:', e) }
       // 初始化查找栏（幂等，见 initSearch 内部缓存）
       try { initSearch() } catch (e) { console.error('initSearch failed:', e) }
+      // 行号 gutter（P4-3）
+      try { initLineNumbers() } catch (e) { console.error('initLineNumbers failed:', e) }
+      // 图片相对路径预览（P4-1）
+      try { fixImagePreview() } catch (e) { console.error('fixImagePreview failed:', e) }
       // 有文件时自动聚焦编辑器（欢迎页场景不抢焦点）
       if (currentFilePath) {
         try { window.vditor.focus() } catch (e) { console.error('focus failed:', e) }
@@ -249,41 +310,46 @@ async function initVditor(content: string) {
           return
         }
 
-        const dirPath = currentFilePath.split(/[/\\]/).slice(0, -1).join('/') + '/assets'
-
-        const fileInfos = await Promise.all(
-          files.map(async (f) => {
-            const d = new Date()
-            return {
-              base64: await fileToBase64(f),
-              name: `${format(d, 'yyyyMMdd_HHmmss')}_${f.name}`.replace(
-                /[^\w-_.]+/g, '_'
-              ),
-            }
-          })
-        )
+        // M11：Promise.all 包 try-catch，避免文件读取失败产生 unhandled rejection
+        let fileInfos: { base64: string; name: string }[]
+        try {
+          fileInfos = await Promise.all(
+            files.map(async (f) => {
+              const d = new Date()
+              return {
+                base64: await fileToBase64(f),
+                name: `${format(d, 'yyyyMMdd_HHmmss')}_${f.name}`.replace(
+                  /[^\w-_.]+/g, '_'
+                ),
+              }
+            })
+          )
+        } catch (e: any) {
+          console.error('图片读取失败:', e)
+          await message(`图片读取失败: ${e}`, { kind: 'error' })
+          return
+        }
 
         try {
+          // P4-6：save_images 返回相对路径（含图片目录，如 assets/xxx.png 或自定义目录）
           const savedFiles = await invoke<string[]>('save_images', {
-            dir: dirPath,
             files: fileInfos,
           })
 
-          savedFiles.forEach((f) => {
-            const relativePath = `assets/${f}`
-            if (f.endsWith('.wav')) {
+          savedFiles.forEach((rel) => {
+            const name = rel.split('/').pop() || rel
+            const ext = name.split('.').pop()?.toLowerCase() || ''
+            // P4-1：不再用 new Image().onload 探测可预览性（桌面端相对路径必然 404），改按扩展名插入
+            if (ext === 'wav' || ext === 'mp3') {
               window.vditor?.insertValue(
-                `\n\n<audio controls="controls" src="${relativePath}"></audio>\n\n`
+                `\n\n<audio controls="controls" src="${rel}"></audio>\n\n`
+              )
+            } else if (ext === 'mp4' || ext === 'webm') {
+              window.vditor?.insertValue(
+                `\n\n<video controls="controls" src="${rel}"></video>\n\n`
               )
             } else {
-              const img = new Image()
-              img.src = relativePath
-              img.onload = () => {
-                window.vditor?.insertValue(`\n\n![](${relativePath})\n\n`)
-              }
-              img.onerror = () => {
-                window.vditor?.insertValue(`\n\n[${f}](${relativePath})\n\n`)
-              }
+              window.vditor?.insertValue(`\n\n![](${rel})\n\n`)
             }
           })
         } catch (e: any) {
@@ -319,8 +385,6 @@ btnNewFile.addEventListener('click', () => {
 })
 
 // ── 关闭确认 ──
-
-// ── 关闭确认 ──
 // Rust 端 api.prevent_close() 阻止关闭 → 发 close-requested 事件
 // 前端弹确认框 → invoke('request_close') 让 Rust 放行关闭
 
@@ -337,18 +401,20 @@ listen('close-requested', async () => {
     return
   }
 
-  const result = await ask('有未保存的修改。是否在关闭前保存？', {
+  const buttons = { yes: '保存并关闭', no: '不保存', cancel: '取消关闭' }
+  const result = await message('有未保存的修改。是否在关闭前保存？', {
     kind: 'warning',
-    buttons: ['保存并关闭', '不保存', '取消关闭'],
+    buttons,
   })
 
-  if (result === true) {
-    await saveFile()
-    await invoke('request_close')
-  } else if (result === false) {
-    await invoke('request_close')
+  // 只有明确点了「保存并关闭」或「不保存」才继续关闭，Esc/关闭对话框视为取消关闭（S6）
+  if (result !== buttons.yes && result !== buttons.no) return
+  // 保存成功才继续关闭（保存失败则中止，防止丢文件）
+  if (result === buttons.yes) {
+    const ok = await saveFile()
+    if (!ok) return
   }
-  // 取消 → 什么也不做
+  await invoke('request_close')
 })
 
 // ── 拖拽打开文件 ──
@@ -358,6 +424,119 @@ document.addEventListener('dragover', (e) => e.preventDefault())
 listen<string>('file-dropped', (event) => {
   openFile(event.payload)
 })
+
+// ── 滚动位置持久化（P4-2）──
+// 按文件路径存 localStorage，跨会话保留阅读位置（参考上游 getScrollEl 的实现）。
+function getScrollEl(): HTMLElement | null {
+  const candidates = [
+    '.vditor-ir .vditor-reset',
+    '.vditor-ir',
+    '.vditor-content',
+    '.vditor-reset',
+  ]
+    .map((sel) => document.querySelector<HTMLElement>(sel))
+    .filter(Boolean) as HTMLElement[]
+  const overflowing = candidates.find((el) => el.scrollHeight - el.clientHeight > 10)
+  return overflowing || candidates[0] || null
+}
+
+const _scrollKey = (path: string) => `vmd-scroll:${path}`
+
+let _scrollTracked = false
+function trackScrollPosition() {
+  if (_scrollTracked) return
+  _scrollTracked = true
+  // capture 监听：scroll 事件不冒泡，但 capture 阶段从 document 下行能捕获到
+  document.addEventListener(
+    'scroll',
+    () => {
+      const el = getScrollEl()
+      if (!el || !currentFilePath) return
+      try {
+        localStorage.setItem(_scrollKey(currentFilePath), String(el.scrollTop))
+      } catch (_) {}
+    },
+    true
+  )
+}
+
+function restoreScrollPosition(path: string | null) {
+  if (!path) return
+  const el = getScrollEl()
+  if (!el) return
+  let saved = 0
+  try {
+    saved = parseInt(localStorage.getItem(_scrollKey(path)) || '0', 10) || 0
+  } catch (_) {}
+  if (!saved) return
+
+  // 大文档的图片/表格/mermaid 异步布局会持续改变 scrollHeight（浏览器 scroll-anchoring
+  // 也会挪动 scrollTop），所以轮询 height 稳定后再收手，而不是一次性设置。
+  let userScrolled = false
+  let done = false
+  let pollTimer: ReturnType<typeof setInterval> | null = null
+
+  const apply = () => {
+    if (userScrolled || done) return
+    el.scrollTop = saved
+  }
+  const onScroll = () => {
+    if (el.scrollTop === saved) return // 自己回放产生的滚动事件，忽略
+    userScrolled = true
+    finish()
+  }
+  const finish = () => {
+    if (done) return
+    done = true
+    if (pollTimer) clearInterval(pollTimer)
+    document.removeEventListener('scroll', onScroll, true)
+  }
+
+  const POLL_MS = 150
+  const SETTLE_AFTER_MS = 1200
+  const HARD_CAP_MS = 20000
+  const startedAt = Date.now()
+  let lastHeight = el.scrollHeight
+  let lastChangedAt = startedAt
+
+  apply()
+  document.addEventListener('scroll', onScroll, true)
+  pollTimer = setInterval(() => {
+    if (userScrolled) {
+      finish()
+      return
+    }
+    const now = Date.now()
+    const h = el.scrollHeight
+    if (h !== lastHeight) {
+      lastHeight = h
+      lastChangedAt = now
+      apply()
+    }
+    if (now - lastChangedAt >= SETTLE_AFTER_MS) finish()
+    else if (now - startedAt >= HARD_CAP_MS) finish()
+  }, POLL_MS)
+}
+
+// ── 主题应用（P4-4 联动）──
+// dark=true → welcome 深色 + vditor dark；dark=false → welcome 浅色 + vditor classic
+function applyTheme(dark: boolean) {
+  welcomeOverlay.classList.toggle('welcome-dark', dark)
+  if (btnWelcomeTheme) btnWelcomeTheme.textContent = dark ? '☀️' : '🌙'
+  try { window.vditor?.setTheme(dark ? 'dark' : 'classic') } catch (_) {}
+}
+
+// ── customCss 注入（P4-5）──
+function injectCustomCss(css: string) {
+  if (!css) return
+  let style = document.getElementById('vmd-custom-css') as HTMLStyleElement | null
+  if (!style) {
+    style = document.createElement('style')
+    style.id = 'vmd-custom-css'
+    document.head.appendChild(style)
+  }
+  style.textContent = css
+}
 
 // ── 应用启动 ──
 
@@ -378,6 +557,7 @@ async function main() {
     await initVditor(pendingContent)
     isInitialContent = false
     updateTitle()
+    restoreScrollPosition(currentFilePath)
   } else {
     // 无文件 → 显示欢迎界面，但 Vditor 后台仍初始化
     showWelcome()
@@ -385,27 +565,38 @@ async function main() {
     isInitialContent = false
   }
 
+  // 滚动位置持续跟踪（幂等）
+  trackScrollPosition()
+
   // 外部链接拦截
   fixLinkClick()
   fixCut()
 
-  // ── 欢迎页深色/浅色手动切换 ──
-  const btnWelcomeTheme = document.getElementById('btn-welcome-theme') as HTMLButtonElement | null
+  // ── 欢迎页深色/浅色 + 系统主题联动（P4-4）──
+  // welcome_dark 为 boolean 视为手动覆盖，否则跟随系统深浅色
+  let manualTheme: boolean | null = null
   try {
     const config = await invoke<any>('get_config')
-    if (config?.welcome_dark) {
-      welcomeOverlay.classList.add('welcome-dark')
-      if (btnWelcomeTheme) btnWelcomeTheme.textContent = '☀️'
-    }
+    manualTheme = typeof config?.welcome_dark === 'boolean' ? config.welcome_dark : null
   } catch (_) {}
+  const initialDark = manualTheme !== null ? manualTheme : (await appWindow.theme()) === 'dark'
+  applyTheme(initialDark)
+
   btnWelcomeTheme?.addEventListener('click', async () => {
-    const isDark = welcomeOverlay.classList.toggle('welcome-dark')
-    btnWelcomeTheme.textContent = isDark ? '☀️' : '🌙'
+    const isDark = !welcomeOverlay.classList.contains('welcome-dark')
+    manualTheme = isDark // 手动切换后视为覆盖，不再跟随系统
+    applyTheme(isDark)
     try {
       const config = await invoke<any>('get_config')
       config.welcome_dark = isDark
       await invoke('save_config', { config })
     } catch (_) {}
+  })
+
+  // 系统深浅色切换时，未手动覆盖则跟随
+  appWindow.onThemeChanged(({ payload: theme }) => {
+    if (manualTheme !== null) return
+    applyTheme(theme === 'dark')
   })
 
   // ── 外部文件修改检测：切回窗口时检查 mtime ──
@@ -418,13 +609,15 @@ async function main() {
       if (!changed) return
       const result = await ask('文件已被外部修改，是否重新加载？', {
         kind: 'warning',
-        buttons: ['重新加载', '忽略'],
+        okLabel: '重新加载',
+        cancelLabel: '忽略',
       })
       if (result === true) {
         const content = await invoke<string>('read_file', {
           path: currentFilePath,
         })
         window.vditor?.setValue(content)
+        restoreScrollPosition(currentFilePath)
       }
       // result === false （忽略）→ Rust 端 check_file_changed 已更新 mtime，不再重复提示
     } catch (e) {
