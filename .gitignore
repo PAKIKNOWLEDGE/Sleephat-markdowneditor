@@ -10,5 +10,5 @@ sub.md
 reference/
 .reasonix/
 log.md
-result
+result/
 shell.nix

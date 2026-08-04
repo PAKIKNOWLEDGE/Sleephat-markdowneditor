@@ -2,7 +2,7 @@
 
 pkgs.stdenv.mkDerivation {
   pname = "sleephat-editor";
-  version = "0.1.0";
+  version = "0.2.0";
 
   # 不拷整个项目，只拿需要的几个文件
   src = null;
